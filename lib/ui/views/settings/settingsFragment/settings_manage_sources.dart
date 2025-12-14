@@ -3,6 +3,7 @@
 import 'package:flutter/material.dart';
 import 'package:revanced_manager/app/app.locator.dart';
 import 'package:revanced_manager/gen/strings.g.dart';
+import 'package:revanced_manager/services/github_api.dart' show GithubAPI, PatchSourceValidationResult;
 import 'package:revanced_manager/services/manager_api.dart';
 import 'package:revanced_manager/services/toast.dart';
 import 'package:revanced_manager/ui/widgets/settingsView/settings_tile_dialog.dart';
@@ -10,91 +11,147 @@ import 'package:stacked/stacked.dart';
 
 class SManageSources extends BaseViewModel {
   final ManagerAPI _managerAPI = locator<ManagerAPI>();
+  final GithubAPI _githubAPI = locator<GithubAPI>();
   final Toast _toast = locator<Toast>();
 
   final TextEditingController _orgPatSourceController = TextEditingController();
   final TextEditingController _patSourceController = TextEditingController();
+  bool _isValidating = false;
 
   Future<void> showSourcesDialog(BuildContext context) async {
     final String patchesRepo = _managerAPI.getPatchesRepo();
     _orgPatSourceController.text = patchesRepo.split('/')[0];
     _patSourceController.text = patchesRepo.split('/')[1];
+    _isValidating = false;
     return showDialog(
       context: context,
-      builder: (context) => AlertDialog(
-        scrollable: true,
-        title: Row(
-          children: <Widget>[
-            Expanded(
-              child: Text(t.settingsView.sourcesLabel),
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          scrollable: true,
+          title: Row(
+            children: <Widget>[
+              Expanded(
+                child: Text(t.settingsView.sourcesLabel),
+              ),
+              IconButton(
+                icon: const Icon(Icons.manage_history_outlined),
+                onPressed: () => showResetConfirmationDialog(context),
+                color: Theme.of(context).colorScheme.secondary,
+              ),
+            ],
+          ),
+          content: Column(
+            children: <Widget>[
+              TextField(
+                controller: _orgPatSourceController,
+                autocorrect: false,
+                onChanged: (value) => setDialogState(() {}),
+                decoration: InputDecoration(
+                  icon: Icon(
+                    Icons.extension_outlined,
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
+                  border: const OutlineInputBorder(),
+                  labelText: t.settingsView.orgPatchesLabel,
+                  hintText: patchesRepo.split('/')[0],
+                ),
+              ),
+              const SizedBox(height: 8),
+              // Patches repository's name
+              TextField(
+                controller: _patSourceController,
+                autocorrect: false,
+                onChanged: (value) => setDialogState(() {}),
+                decoration: InputDecoration(
+                  icon: const Icon(
+                    Icons.extension_outlined,
+                    color: Colors.transparent,
+                  ),
+                  border: const OutlineInputBorder(),
+                  labelText: t.settingsView.sourcesPatchesLabel,
+                  hintText: patchesRepo.split('/')[1],
+                ),
+              ),
+              const SizedBox(height: 20),
+              Text(t.settingsView.sourcesUpdateNote),
+            ],
+          ),
+          actions: <Widget>[
+            TextButton(
+              onPressed: _isValidating
+                  ? null
+                  : () {
+                      _orgPatSourceController.clear();
+                      _patSourceController.clear();
+                      Navigator.of(context).pop();
+                    },
+              child: Text(t.cancelButton),
             ),
-            IconButton(
-              icon: const Icon(Icons.manage_history_outlined),
-              onPressed: () => showResetConfirmationDialog(context),
-              color: Theme.of(context).colorScheme.secondary,
+            FilledButton(
+              onPressed: _isValidating
+                  ? null
+                  : () => _validateAndSaveSource(context, setDialogState),
+              child: _isValidating
+                  ? const SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : Text(t.okButton),
             ),
           ],
         ),
-        content: Column(
-          children: <Widget>[
-            TextField(
-              controller: _orgPatSourceController,
-              autocorrect: false,
-              onChanged: (value) => notifyListeners(),
-              decoration: InputDecoration(
-                icon: Icon(
-                  Icons.extension_outlined,
-                  color: Theme.of(context).colorScheme.onSurfaceVariant,
-                ),
-                border: const OutlineInputBorder(),
-                labelText: t.settingsView.orgPatchesLabel,
-                hintText: patchesRepo.split('/')[0],
-              ),
-            ),
-            const SizedBox(height: 8),
-            // Patches repository's name
-            TextField(
-              controller: _patSourceController,
-              autocorrect: false,
-              onChanged: (value) => notifyListeners(),
-              decoration: InputDecoration(
-                icon: const Icon(
-                  Icons.extension_outlined,
-                  color: Colors.transparent,
-                ),
-                border: const OutlineInputBorder(),
-                labelText: t.settingsView.sourcesPatchesLabel,
-                hintText: patchesRepo.split('/')[1],
-              ),
-            ),
-            const SizedBox(height: 20),
-            Text(t.settingsView.sourcesUpdateNote),
-          ],
-        ),
-        actions: <Widget>[
-          TextButton(
-            onPressed: () {
-              _orgPatSourceController.clear();
-              _patSourceController.clear();
-              Navigator.of(context).pop();
-            },
-            child: Text(t.cancelButton),
-          ),
-          FilledButton(
-            onPressed: () {
-              _managerAPI.setPatchesRepo(
-                '${_orgPatSourceController.text.trim()}/${_patSourceController.text.trim()}',
-              );
-              _managerAPI.setCurrentPatchesVersion('0.0.0');
-              _managerAPI.setLastUsedPatchesVersion();
-              _toast.showBottom(t.settingsView.restartAppForChanges);
-              Navigator.of(context).pop();
-            },
-            child: Text(t.okButton),
-          ),
-        ],
       ),
     );
+  }
+
+  Future<void> _validateAndSaveSource(
+    BuildContext context,
+    StateSetter setDialogState,
+  ) async {
+    final String org = _orgPatSourceController.text.trim();
+    final String repo = _patSourceController.text.trim();
+    final String repoName = '$org/$repo';
+
+    // Basic validation
+    if (org.isEmpty || repo.isEmpty) {
+      _toast.showBottom(t.settingsView.sourcesValidationErrorRepoNotFound);
+      return;
+    }
+
+    _isValidating = true;
+    setDialogState(() {});
+
+    try {
+      _toast.showBottom(t.settingsView.sourcesValidating);
+
+      final result = await _githubAPI.validatePatchSource(repoName);
+
+      switch (result) {
+        case PatchSourceValidationResult.success:
+          _managerAPI.setPatchesRepo(repoName);
+          _managerAPI.setCurrentPatchesVersion('0.0.0');
+          _managerAPI.setLastUsedPatchesVersion();
+          _toast.showBottom(t.settingsView.restartAppForChanges);
+          Navigator.of(context).pop();
+          break;
+        case PatchSourceValidationResult.repoNotFound:
+          _toast.showBottom(t.settingsView.sourcesValidationErrorRepoNotFound);
+          break;
+        case PatchSourceValidationResult.noReleases:
+          _toast.showBottom(t.settingsView.sourcesValidationErrorNoReleases);
+          break;
+        case PatchSourceValidationResult.noPatchFile:
+          _toast.showBottom(t.settingsView.sourcesValidationErrorNoPatchFile);
+          break;
+        case PatchSourceValidationResult.networkError:
+          _toast.showBottom(t.settingsView.sourcesValidationErrorNetwork);
+          break;
+      }
+    } finally {
+      _isValidating = false;
+      setDialogState(() {});
+    }
   }
 
   Future<void> showResetConfirmationDialog(BuildContext context) async {

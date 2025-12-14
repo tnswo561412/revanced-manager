@@ -52,6 +52,59 @@ class GithubAPI {
     }
   }
 
+  /// Validates if a repository exists and has valid patch releases.
+  /// Returns a [PatchSourceValidationResult] indicating success or the type of error.
+  Future<PatchSourceValidationResult> validatePatchSource(String repoName) async {
+    try {
+      // First check if the repository exists
+      final repoResponse = await _dio.get('/repos/$repoName');
+      if (repoResponse.statusCode != 200) {
+        return PatchSourceValidationResult.repoNotFound;
+      }
+
+      // Check if the repository has releases with .rvp files
+      final String target =
+          _managerAPI.usePrereleases() ? '?per_page=1' : '/latest';
+      final releasesResponse = await _dio.get('/repos/$repoName/releases$target');
+
+      if (releasesResponse.statusCode != 200) {
+        return PatchSourceValidationResult.noReleases;
+      }
+
+      final dynamic releaseData = _managerAPI.usePrereleases()
+          ? (releasesResponse.data as List).firstOrNull
+          : releasesResponse.data;
+
+      if (releaseData == null) {
+        return PatchSourceValidationResult.noReleases;
+      }
+
+      // Check if the release has a .rvp file
+      final List<dynamic>? assets = releaseData['assets'] as List<dynamic>?;
+      if (assets == null || assets.isEmpty) {
+        return PatchSourceValidationResult.noPatchFile;
+      }
+
+      final bool hasRvpFile = assets.any(
+        (asset) => (asset['name'] as String?)?.endsWith('.rvp') ?? false,
+      );
+
+      if (!hasRvpFile) {
+        return PatchSourceValidationResult.noPatchFile;
+      }
+
+      return PatchSourceValidationResult.success;
+    } on DioException catch (e) {
+      if (kDebugMode) {
+        print(e);
+      }
+      if (e.response?.statusCode == 404) {
+        return PatchSourceValidationResult.repoNotFound;
+      }
+      return PatchSourceValidationResult.networkError;
+    }
+  }
+
   Future<String?> getChangelogs(bool isPatches) async {
     final String repoName =
         isPatches
@@ -125,4 +178,22 @@ class GithubAPI {
     }
     return null;
   }
+}
+
+/// Result of validating a patch source repository.
+enum PatchSourceValidationResult {
+  /// The repository is valid and has patch files.
+  success,
+
+  /// The repository was not found (404 error or invalid format).
+  repoNotFound,
+
+  /// The repository exists but has no releases.
+  noReleases,
+
+  /// The repository has releases but no .rvp patch files.
+  noPatchFile,
+
+  /// A network error occurred during validation.
+  networkError,
 }

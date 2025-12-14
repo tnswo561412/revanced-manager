@@ -128,6 +128,10 @@ class DashboardViewModel(
     }
 
     fun createRemoteSource(apiUrl: String, autoUpdate: Boolean) = viewModelScope.launch {
-        patchBundleRepository.createRemote(apiUrl, autoUpdate)
+        try {
+            patchBundleRepository.createRemote(apiUrl, autoUpdate)
+        } catch (e: PatchBundleRepository.InvalidBundleSourceException) {
+            app.toast(e.message ?: app.getString(R.string.source_invalid_url))
+        }
     }
 }

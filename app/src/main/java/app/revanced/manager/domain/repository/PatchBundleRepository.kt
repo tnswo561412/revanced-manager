@@ -304,12 +304,76 @@ class PatchBundleRepository(
         doReload()
     }
 
-    suspend fun createRemote(url: String, autoUpdate: Boolean) =
+    /**
+     * Creates a new remote patch bundle source.
+     * Validates and downloads the patch bundle before saving to ensure the URL is valid.
+     *
+     * @throws InvalidBundleSourceException if the URL is invalid or the download fails
+     */
+    suspend fun createRemote(url: String, autoUpdate: Boolean) {
+        // Validate URL format first
+        val source = try {
+            SourceInfo.from(url)
+        } catch (e: Exception) {
+            throw InvalidBundleSourceException(
+                app.getString(R.string.source_invalid_url),
+                e
+            )
+        }
+
+        // Ensure it's a remote source
+        if (source !is SourceInfo.Remote) {
+            throw InvalidBundleSourceException(
+                app.getString(R.string.source_invalid_url)
+            )
+        }
+
+        // Create temporary entity to test the download
+        val uid = generateUid()
+        val entity = PatchBundleEntity(
+            uid = uid,
+            name = "",
+            versionHash = null,
+            source = source,
+            autoUpdate = autoUpdate
+        )
+        val dir = directoryOf(uid)
+        val src = JsonPatchBundle(
+            "",
+            uid,
+            null,
+            null,
+            dir,
+            source.url.toString(),
+            autoUpdate,
+        )
+
+        // Try to download the bundle to validate the source, then save to database
         dispatchAction("Add bundle ($url)") { state ->
-            val src = createEntity("", SourceInfo.from(url), autoUpdate).load() as RemotePatchBundle
-            update(src)
+            val versionHash: String
+            try {
+                versionHash = with(src) { downloadLatest() }
+            } catch (e: Exception) {
+                // Clean up any partial downloads
+                dir.deleteRecursively()
+                if (e is CancellationException) throw e
+                Log.e(tag, "Failed to validate patch source: $url", e)
+                throw InvalidBundleSourceException(
+                    app.getString(R.string.source_add_fail, e.simpleMessage()),
+                    e
+                )
+            }
+
+            // Only save to database after successful download
+            dao.upsert(entity.copy(versionHash = versionHash))
             state.copy(sources = state.sources.put(src.uid, src))
         }
+
+        // Reload to update metadata
+        reload()
+    }
+
+    class InvalidBundleSourceException(message: String, cause: Throwable? = null) : Exception(message, cause)
 
     suspend fun reloadApiBundles() = dispatchAction("Reload API bundles") {
         this@PatchBundleRepository.sources.first().filterIsInstance<APIPatchBundle>().forEach {
